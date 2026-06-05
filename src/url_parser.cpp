@@ -183,16 +183,7 @@ VsUrl ParseVsUrl(const std::wstring& raw) {
         }
     }
 
-    // Split on the LAST '#' for the legacy fragment form.
-    std::wstring path_part;
-    std::wstring frag_part;
-    auto hash = s.rfind(L'#');
-    if (hash == std::wstring::npos) {
-        path_part = s;
-    } else {
-        path_part = s.substr(0, hash);
-        frag_part = s.substr(hash + 1);
-    }
+    std::wstring path_part = s;
 
     // Trim a trailing slash that some launchers append.
     while (!path_part.empty() && (path_part.back() == L'/' ||
@@ -220,31 +211,6 @@ VsUrl ParseVsUrl(const std::wstring& raw) {
     // Normalize separators to backslash.
     for (auto& c : out.file) {
         if (c == L'/') c = L'\\';
-    }
-
-    // Parse legacy fragment.  Accepted: "1234", "L1234", "1234:56", "L1234:56".
-    if (!frag_part.empty() && out.line == 0) {
-        std::wstring f = PercentDecodeUtf8(frag_part);
-        size_t i = 0;
-        if (i < f.size() && (f[i] == L'L' || f[i] == L'l')) ++i;
-
-        int ln = 0;
-        bool any = false;
-        while (i < f.size() && f[i] >= L'0' && f[i] <= L'9') {
-            ln = ln * 10 + (f[i] - L'0');
-            ++i; any = true;
-        }
-        if (any) out.line = ln;
-
-        if (i < f.size() && (f[i] == L':' || f[i] == L',')) {
-            ++i;
-            int cv = 0; bool anyc = false;
-            while (i < f.size() && f[i] >= L'0' && f[i] <= L'9') {
-                cv = cv * 10 + (f[i] - L'0');
-                ++i; anyc = true;
-            }
-            if (anyc) out.column = cv;
-        }
     }
 
     out.valid = !out.file.empty();

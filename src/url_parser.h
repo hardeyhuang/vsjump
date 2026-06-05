@@ -11,7 +11,7 @@ struct VsUrl {
     bool         valid  = false;
 };
 
-// Parses a vsjump URL.  Primary (VS Code-style) form:
+// Parses a vsjump URL (VS Code-style):
 //
 //   vsjump://file/D:\path\to\foo.cpp:123:1
 //   vsjump://file/D:/path/to/foo.cpp:123
@@ -19,11 +19,6 @@ struct VsUrl {
 //
 // Spaces and other special characters in the path may be percent-encoded
 // (e.g. `%20`).  The "file/" authority is optional but recommended.
-//
-// Legacy fragment form is still accepted for backward compatibility:
-//
-//   vsjump://D:/path/to/foo.cpp#123
-//   vsjump://D:/path/to/foo.cpp#L123:8
 VsUrl ParseVsUrl(const std::wstring& raw);
 
 } // namespace vsjump

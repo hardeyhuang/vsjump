@@ -5,10 +5,6 @@
 //   vsjump://file/D:\path\to\file.cpp:1234:8
 //   vsjump://file/D:/path/with%20space/file.cpp:1234
 //
-// Legacy fragment form is also accepted:
-//   vsjump://D:/path/to/file.cpp#1234
-//   vsjump://D:/path/to/file.cpp#L1234:8
-//
 // Usage:
 //   vsjump.exe register              Register the vsjump:// protocol
 //   vsjump.exe unregister            Remove the vsjump:// registration
@@ -59,8 +55,7 @@ void PrintHelp() {
         L"URL formats:\r\n"
         L"  vsjump://file/D:\\proj\\src\\foo.cpp:1234:8     (VS Code style)\r\n"
         L"  vsjump://file/D:/proj/src/foo.cpp:1234\r\n"
-        L"  vsjump://file/D:/proj/with%20space/foo.cpp:42\r\n"
-        L"  vsjump://D:/proj/src/foo.cpp#1234              (legacy)\r\n");
+        L"  vsjump://file/D:/proj/with%20space/foo.cpp:42\r\n");
 }
 
 int CmdRegister() {
