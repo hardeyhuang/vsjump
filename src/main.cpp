@@ -1,14 +1,19 @@
 // VsJump — open a file in a running Visual Studio.
 //
-// URL shape (VS Code-style):
-//   vsjump://file/D:\path\to\file.cpp:1234
-//   vsjump://file/D:\path\to\file.cpp:1234:8
-//   vsjump://file/D:/path/with%20space/file.cpp:1234
+// URL shapes:
+//   vsjump://file/D:\path\to\file.cpp:1234:8           (direct, VS Code-style)
+//   vsjump://file/D:/path/with%20space/file.cpp:42
+//   vsjump://match/?srcfile=<remote>:<line>[:<col>]&destdir=<localdir>
+//                                                      (resolve a non-local
+//                                                       source path against
+//                                                       one or more local
+//                                                       source roots)
 //
 // Usage:
 //   vsjump.exe register              Register the vsjump:// protocol
 //   vsjump.exe unregister            Remove the vsjump:// registration
 //   vsjump.exe "vsjump://file/...:1234:1"
+//   vsjump.exe "vsjump://match/?srcfile=...&destdir=..."
 //   vsjump.exe --help
 
 #include "path_utils.h"
@@ -55,7 +60,12 @@ void PrintHelp() {
         L"URL formats:\r\n"
         L"  vsjump://file/D:\\proj\\src\\foo.cpp:1234:8     (VS Code style)\r\n"
         L"  vsjump://file/D:/proj/src/foo.cpp:1234\r\n"
-        L"  vsjump://file/D:/proj/with%20space/foo.cpp:42\r\n");
+        L"  vsjump://file/D:/proj/with%20space/foo.cpp:42\r\n"
+        L"\r\n"
+        L"  vsjump://match/?srcfile=<src>:<line>[:<col>]&destdir=<dir>\r\n"
+        L"  Looks up a (typically WinDbg-reported) source path inside one\r\n"
+        L"  or more local source roots by trailing-segment match. Multiple\r\n"
+        L"  destdir= values are allowed.\r\n");
 }
 
 int CmdRegister() {
@@ -158,23 +168,81 @@ PickResult PickVsForFile(const std::vector<vsjump::VsInstance>& instances,
     return r;
 }
 
+// Resolve `parsed` (which may be Match-kind) into an absolute local file path.
+// Returns empty wstring on failure (and shows a diagnostic message box).
+// `out_rc` receives the exit code to use on failure.
+std::wstring ResolveTargetFile(const vsjump::VsUrl& parsed, int* out_rc) {
+    if (parsed.kind == vsjump::VsUrlKind::Direct) {
+        std::wstring abs_file = vsjump::NormalizePath(parsed.file);
+        if (abs_file.empty()) {
+            Msg(L"VsJump",
+                L"Could not resolve file path:\n" + parsed.file,
+                MB_ICONERROR);
+            *out_rc = 3;
+        }
+        return abs_file;
+    }
+
+    // Match kind.
+    vsjump::MatchCandidate              best;
+    std::vector<vsjump::MatchCandidate> ties;
+    if (!vsjump::FindBestSourceMatch(parsed.file, parsed.match_dirs,
+                                     &best, &ties)) {
+        std::wstring roots;
+        for (const auto& d : parsed.match_dirs) {
+            if (!roots.empty()) roots += L"\n";
+            roots += L"  " + d;
+        }
+        Msg(L"VsJump — no match",
+            L"No file matching the source path was found under the given "
+            L"destdir(s).\n\nSource:\n  " + parsed.file +
+            L"\n\nSearched roots:\n" + roots,
+            MB_ICONWARNING);
+        *out_rc = 7;
+        return {};
+    }
+
+    // Unique best — done.
+    if (ties.size() == 1) {
+        return vsjump::NormalizePath(best.path);
+    }
+
+    // Multiple files tied for the highest trailing-segment match — ask user.
+    std::vector<std::wstring> opts;
+    opts.reserve(ties.size());
+    for (const auto& c : ties) opts.push_back(c.path);
+
+    int chosen = vsjump::PickFromList(
+        L"VsJump — Multiple matches",
+        L"Several local files match the source path equally well. "
+        L"Pick which one to open:",
+        L"Source:\n" + parsed.file,
+        opts,
+        /*default_index=*/0);
+
+    if (chosen < 0) {
+        *out_rc = 0;  // user cancelled
+        return {};
+    }
+    return vsjump::NormalizePath(ties[static_cast<size_t>(chosen)].path);
+}
+
 int CmdOpenUrl(const std::wstring& url) {
     vsjump::VsUrl parsed = vsjump::ParseVsUrl(url);
-    if (!parsed.valid) {
+    if (!parsed.valid()) {
         Msg(L"VsJump",
             L"Could not parse the URL:\n" + url +
-            L"\n\nExpected:\n"
-            L"  vsjump://file/<absolute path>:<line>[:<col>]",
+            L"\n\nExpected one of:\n"
+            L"  vsjump://file/<absolute path>:<line>[:<col>]\n"
+            L"  vsjump://match/?srcfile=<path>:<line>[:<col>]&destdir=<dir>",
             MB_ICONERROR);
         return 3;
     }
 
-    std::wstring abs_file = vsjump::NormalizePath(parsed.file);
+    int          rc_resolve = 0;
+    std::wstring abs_file   = ResolveTargetFile(parsed, &rc_resolve);
     if (abs_file.empty()) {
-        Msg(L"VsJump",
-            L"Could not resolve file path:\n" + parsed.file,
-            MB_ICONERROR);
-        return 3;
+        return rc_resolve;
     }
 
     if (FAILED(::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {

@@ -18,10 +18,14 @@ that one opens the file. Otherwise the tool tells you and stops.
 
 - **Single-purpose URL protocol** — register once, use from anywhere that can
   launch a URL (`start`, `ShellExecute`, an `<a href>`, etc.).
-- **VS Code–style URLs**:
+- **VS Code–style direct URLs**:
   - `vsjump://file/D:/proj/src/foo.cpp:1234:8`
   - `vsjump://file/D:\proj\src\foo.cpp:1234`
   - `vsjump://file/D:/proj/src/foo.cpp`
+- **Source-tree match URLs** — turn a build-server / WinDbg-style path into a
+  local file by recursive name + tail-segment matching against one or more
+  local source roots (see [Match form](#match-form)):
+  - `vsjump://match/?srcfile=c:\build\agent\src\foo.cpp:1234:8&destdir=D:\repo`
 - **Smart routing** — enumerates running VS instances via the COM Running
   Object Table (`!VisualStudio.DTE.*`) and picks the right one (see
   [How the target VS is chosen](#how-the-target-vs-is-chosen)).
@@ -95,21 +99,63 @@ You can also invoke the tool directly, bypassing the shell:
 
 ### URL grammar
 
+VsJump accepts two URL kinds:
+
 ```
-vsjump://file/<absolute-path>[:<line>[:<column>]]
+vsjump://file/<absolute-path>[:<line>[:<column>]]                        (direct)
+vsjump://match/?srcfile=<src-path>[:<line>[:<column>]]&destdir=<dir>...  (match)
 ```
 
-- The path may use either `/` or `\`.
+Common rules:
+
+- Paths may use either `/` or `\`.
 - Percent-encoded sequences (`%20`, etc.) are decoded as UTF-8.
 - `line` and `column` are **1-based**; both are optional.
 
-Examples:
+#### Direct form examples
 
 | URL | Meaning |
 |---|---|
 | `vsjump://file/D:/proj/src/foo.cpp:1234:8` | foo.cpp, line 1234, column 8 |
 | `vsjump://file/D:\proj\src\foo.cpp:42` | foo.cpp, line 42 |
 | `vsjump://file/D:/proj/with%20space/foo.cpp:1` | percent-decoded path |
+
+#### Match form
+
+Designed for tools (typically **WinDbg**, crash dump analyzers, CI log
+viewers) that emit source paths from the **build machine** — paths that do
+not exist on the developer's box. VsJump resolves them against one or more
+local source roots before opening.
+
+```
+vsjump://match/?srcfile=<src-path>[:<line>[:<col>]]&destdir=<localdir>[&destdir=<localdir2>...]
+```
+
+Resolution algorithm:
+
+1. Take the **basename** of `srcfile` (e.g. `foo.cpp`).
+2. Recursively scan every `destdir` for files with that basename
+   (case-insensitive, follows no symlinks/junctions).
+3. Score each hit by the number of **trailing path segments** it shares with
+   `srcfile` (case-insensitive). Highest score wins.
+4. If multiple hits tie for the top score, a picker dialog asks the user.
+5. If no file with that basename exists under any `destdir`, an error is
+   shown and exit code `7` is returned.
+
+Examples:
+
+```text
+# WinDbg reports a path like c:\build\agent\xyz\src\modules\foo.cpp:1843
+# Match it against the local checkout at D:\dev\repo:
+vsjump://match/?srcfile=c%3A%5Cbuild%5Cagent%5Cxyz%5Csrc%5Cmodules%5Cfoo.cpp%3A1843&destdir=D%3A%5Cdev%5Crepo
+
+# Multiple search roots are allowed:
+vsjump://match/?srcfile=/builds/x/src/foo.cpp:42&destdir=D:\repoA&destdir=D:\repoB
+```
+
+> Tip: keep `destdir` reasonably scoped (a project tree, not all of `C:\`)
+> so the recursive scan stays fast. The scan does not prune `node_modules`,
+> `.git`, build outputs, etc.
 
 ---
 
@@ -143,6 +189,7 @@ started** — VsJump is intentionally a router, not a launcher.
 | 4 | `CoInitializeEx` failed |
 | 5 | No VS running, or no instance could be selected |
 | 6 | Found a VS but `OpenFile` / `GotoLine` failed |
+| 7 | Match URL: no local file matched `srcfile` under any `destdir` |
 
 ---
 

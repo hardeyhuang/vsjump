@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <string>
+#include <vector>
 
 namespace vsjump {
 
@@ -126,6 +127,140 @@ void ExtractTrailingLineCol(std::wstring& path_part,
     }
 }
 
+// Convert all '/' to '\\' in-place.
+void NormalizeSeparators(std::wstring& s) {
+    for (auto& c : s) {
+        if (c == L'/') c = L'\\';
+    }
+}
+
+// Strip a single leading "/<drive-letter>:" slash that some shells inject.
+void StripBogusLeadingSlash(std::wstring& s) {
+    if (!s.empty() && s.front() == L'/') {
+        if (s.size() >= 3 && ((s[1] >= L'A' && s[1] <= L'Z') ||
+                              (s[1] >= L'a' && s[1] <= L'z')) &&
+            s[2] == L':') {
+            s = s.substr(1);
+        }
+    }
+}
+
+// Parse the body of a Direct URL (everything after "vsjump://[file/]").
+void ParseDirectBody(std::wstring s, VsUrl& out) {
+    StripBogusLeadingSlash(s);
+
+    // Trim a trailing slash that some launchers append.
+    while (!s.empty() && (s.back() == L'/' || s.back() == L'\\')) {
+        if (s.size() <= 3) break;  // Don't strip the root "C:\".
+        s.pop_back();
+    }
+
+    s = PercentDecodeUtf8(s);
+
+    int line = 0, col = 0;
+    ExtractTrailingLineCol(s, line, col);
+    out.line   = line;
+    out.column = col;
+
+    out.file = s;
+    NormalizeSeparators(out.file);
+
+    if (!out.file.empty()) {
+        out.kind = VsUrlKind::Direct;
+    }
+}
+
+// Split the query string ("k1=v1&k2=v2") into (key, value) pairs.
+// Keys are compared case-insensitively by callers; values are returned raw
+// (still percent-encoded — callers decide when to decode).
+std::vector<std::pair<std::wstring, std::wstring>>
+SplitQuery(const std::wstring& q) {
+    std::vector<std::pair<std::wstring, std::wstring>> out;
+    size_t i = 0;
+    while (i < q.size()) {
+        size_t amp = q.find(L'&', i);
+        std::wstring kv = (amp == std::wstring::npos)
+                              ? q.substr(i)
+                              : q.substr(i, amp - i);
+        if (!kv.empty()) {
+            size_t eq = kv.find(L'=');
+            if (eq == std::wstring::npos) {
+                out.emplace_back(kv, std::wstring());
+            } else {
+                out.emplace_back(kv.substr(0, eq), kv.substr(eq + 1));
+            }
+        }
+        if (amp == std::wstring::npos) break;
+        i = amp + 1;
+    }
+    return out;
+}
+
+bool EqIgnoreCaseAscii(const std::wstring& a, const wchar_t* b) {
+    size_t n = wcslen(b);
+    if (a.size() != n) return false;
+    for (size_t i = 0; i < n; ++i) {
+        wchar_t x = a[i], y = b[i];
+        if (x >= L'A' && x <= L'Z') x = static_cast<wchar_t>(x - L'A' + L'a');
+        if (y >= L'A' && y <= L'Z') y = static_cast<wchar_t>(y - L'A' + L'a');
+        if (x != y) return false;
+    }
+    return true;
+}
+
+// Parse the body of a Match URL (everything after "vsjump://match/").
+//
+// Expected shape: "?srcfile=<path>[:<line>[:<col>]]&destdir=<dir>[&destdir=...]"
+// We are lenient about a missing leading '?'.
+void ParseMatchBody(std::wstring s, VsUrl& out) {
+    if (!s.empty() && s.front() == L'?') s = s.substr(1);
+    if (s.empty()) return;
+
+    auto kvs = SplitQuery(s);
+
+    std::wstring              srcfile_raw;
+    std::vector<std::wstring> dirs;
+    bool                      have_srcfile = false;
+
+    for (auto& kv : kvs) {
+        const auto& key = kv.first;
+        auto&       val = kv.second;
+        if (EqIgnoreCaseAscii(key, L"srcfile") ||
+            EqIgnoreCaseAscii(key, L"src")) {
+            srcfile_raw  = val;
+            have_srcfile = true;
+        } else if (EqIgnoreCaseAscii(key, L"destdir") ||
+                   EqIgnoreCaseAscii(key, L"dir") ||
+                   EqIgnoreCaseAscii(key, L"root")) {
+            std::wstring d = PercentDecodeUtf8(val);
+            NormalizeSeparators(d);
+            // Strip surrounding quotes if any.
+            if (d.size() >= 2 && d.front() == L'"' && d.back() == L'"') {
+                d = d.substr(1, d.size() - 2);
+            }
+            // Trim trailing separators (except drive root).
+            while (d.size() > 3 && d.back() == L'\\') d.pop_back();
+            if (!d.empty()) dirs.push_back(d);
+        }
+    }
+
+    if (!have_srcfile || srcfile_raw.empty() || dirs.empty()) return;
+
+    std::wstring path_part = PercentDecodeUtf8(srcfile_raw);
+
+    int line = 0, col = 0;
+    ExtractTrailingLineCol(path_part, line, col);
+    out.line   = line;
+    out.column = col;
+
+    NormalizeSeparators(path_part);
+    if (path_part.empty()) return;
+
+    out.file       = path_part;
+    out.match_dirs = std::move(dirs);
+    out.kind       = VsUrlKind::Match;
+}
+
 } // namespace
 
 VsUrl ParseVsUrl(const std::wstring& raw) {
@@ -146,74 +281,40 @@ VsUrl ParseVsUrl(const std::wstring& raw) {
         // Tolerate a missing "//" (some shells / launchers strip it).
         s = s.substr(7);
     } else {
-        // Not a vsjump URL — caller might have passed a raw path; we won't accept it.
+        // Not a vsjump URL.
         return out;
     }
 
-    // Optional "file/" authority (VS Code-style: vsjump://file/D:\...).
+    // Authority dispatch: "match/..." vs "file/..." vs bare path.
+    if (StartsWithIgnoreCase(s, L"match/")) {
+        ParseMatchBody(s.substr(6), out);
+        return out;
+    }
+    if (StartsWithIgnoreCase(s, L"match?")) {
+        // Tolerate "vsjump://match?srcfile=..." (no trailing slash).
+        ParseMatchBody(s.substr(5), out);
+        return out;
+    }
+
     if (StartsWithIgnoreCase(s, L"file/")) {
         s = s.substr(5);
-        // Tolerate "file//" or "file///".
-        while (!s.empty() && (s.front() == L'/' || s.front() == L'\\')) {
-            // Don't strip if what follows looks like a UNC "//server".
-            // But here we only strip up to one extra slash to be safe.
+        // Tolerate "file//" or "file///" — strip a single extra slash if a
+        // drive letter follows.
+        if (!s.empty() && (s.front() == L'/' || s.front() == L'\\')) {
             if (s.size() >= 3 && ((s[1] >= L'A' && s[1] <= L'Z') ||
                                   (s[1] >= L'a' && s[1] <= L'z')) &&
                 s[2] == L':') {
                 s = s.substr(1);
-                break;
             }
-            break;
         }
     } else if (StartsWithIgnoreCase(s, L"file:")) {
-        // "vsjump://file:..." — uncommon but handle it.
         s = s.substr(5);
         while (!s.empty() && (s.front() == L'/' || s.front() == L'\\')) {
             s = s.substr(1);
         }
     }
 
-    // Some shells turn "C:\..." into "/C:/..." after the //.
-    if (!s.empty() && s.front() == L'/') {
-        // Only strip if the next chars look like a drive letter.
-        if (s.size() >= 3 && ((s[1] >= L'A' && s[1] <= L'Z') ||
-                              (s[1] >= L'a' && s[1] <= L'z')) &&
-            s[2] == L':') {
-            s = s.substr(1);
-        }
-    }
-
-    std::wstring path_part = s;
-
-    // Trim a trailing slash that some launchers append.
-    while (!path_part.empty() && (path_part.back() == L'/' ||
-                                   path_part.back() == L'\\')) {
-        // Don't strip the root "C:\".
-        if (path_part.size() <= 3) break;
-        path_part.pop_back();
-    }
-
-    // Decode percent-escapes BEFORE peeling line/col (so that a `%3A` inside
-    // a filename doesn't fool us, and so that real `:` separators are still
-    // visible).  Note: percent-decoding will not introduce or remove `:`
-    // characters except where the user explicitly encoded them.
-    path_part = PercentDecodeUtf8(path_part);
-
-    // Pull a trailing ":line[:col]" off the path, before doing the slash
-    // normalization (so `D:` at the start can be distinguished by position).
-    int line = 0, col = 0;
-    ExtractTrailingLineCol(path_part, line, col);
-    out.line   = line;
-    out.column = col;
-
-    out.file = path_part;
-
-    // Normalize separators to backslash.
-    for (auto& c : out.file) {
-        if (c == L'/') c = L'\\';
-    }
-
-    out.valid = !out.file.empty();
+    ParseDirectBody(s, out);
     return out;
 }
 

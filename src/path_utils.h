@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace vsjump {
 
@@ -16,5 +17,28 @@ std::wstring ToLowerAscii(std::wstring s);
 
 // Get current executable full path.
 std::wstring GetExecutablePath();
+
+// Result of FindBestSourceMatch.
+struct MatchCandidate {
+    std::wstring path;             // Absolute path under one of the search roots.
+    int          matched_segments; // Number of trailing path segments that match `srcfile`.
+};
+
+// Search every directory in `roots` (recursively) for files whose basename
+// equals the basename of `srcfile`, then rank by trailing-segment match
+// length against `srcfile` (case-insensitive).
+//
+// `out_best` receives the best candidate (highest matched_segments).  All
+// candidates that tie for the top score are returned in `out_ties` (in the
+// order encountered).  If no file with that basename is found anywhere,
+// returns false and `out_ties` is empty.
+//
+// The basename comparison is case-insensitive (Windows semantics).  Hidden
+// directories (`.git`, `.vs`, `node_modules`, build output dirs) are NOT
+// pruned automatically — keep `roots` reasonably scoped for fast scans.
+bool FindBestSourceMatch(const std::wstring&              srcfile,
+                         const std::vector<std::wstring>& roots,
+                         MatchCandidate*                  out_best,
+                         std::vector<MatchCandidate>*     out_ties);
 
 } // namespace vsjump
