@@ -22,6 +22,8 @@
 *.dylib
 *.dll
 *.so.*
+# ...except vendored third-party SDKs we ship with the source tree.
+!third_party/**/*.dll
 
 
 # Fortran module files

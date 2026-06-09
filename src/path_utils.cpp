@@ -76,12 +76,7 @@ std::wstring GetExecutablePath() {
 // Source-tree matching (used by `vsjump://match/?...`).
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// Split a normalized path into segments by '\\'. Empty segments dropped.
-// "C:\foo\bar.cpp" -> {"C:", "foo", "bar.cpp"}
-// "/builds/x/foo.cpp" -> {"builds", "x", "foo.cpp"}
-std::vector<std::wstring> SplitSegments(const std::wstring& path) {
+std::vector<std::wstring> SplitPathSegments(const std::wstring& path) {
     std::vector<std::wstring> segs;
     std::wstring              cur;
     for (wchar_t c : path) {
@@ -98,6 +93,8 @@ std::vector<std::wstring> SplitSegments(const std::wstring& path) {
     return segs;
 }
 
+namespace {
+
 bool EqIgnoreCaseAscii(const std::wstring& a, const std::wstring& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -109,10 +106,11 @@ bool EqIgnoreCaseAscii(const std::wstring& a, const std::wstring& b) {
     return true;
 }
 
-// Number of trailing segments of `a` and `b` that match (case-insensitive).
-int TrailingMatchCount(const std::vector<std::wstring>& a,
-                       const std::vector<std::wstring>& b) {
-    int n = 0;
+} // namespace
+
+int TrailingSegmentMatch(const std::vector<std::wstring>& a,
+                         const std::vector<std::wstring>& b) {
+    int n  = 0;
     int ia = static_cast<int>(a.size()) - 1;
     int ib = static_cast<int>(b.size()) - 1;
     while (ia >= 0 && ib >= 0 && EqIgnoreCaseAscii(a[ia], b[ib])) {
@@ -122,6 +120,8 @@ int TrailingMatchCount(const std::vector<std::wstring>& a,
     }
     return n;
 }
+
+namespace {
 
 // Recursively walk `dir` and append every regular file whose basename equals
 // `basename` (case-insensitive) to `out`.
@@ -178,7 +178,7 @@ bool FindBestSourceMatch(const std::wstring&              srcfile,
 
     if (srcfile.empty() || roots.empty()) return false;
 
-    std::vector<std::wstring> src_segs = SplitSegments(srcfile);
+    std::vector<std::wstring> src_segs = SplitPathSegments(srcfile);
     if (src_segs.empty()) return false;
     const std::wstring& basename = src_segs.back();
 
@@ -201,8 +201,8 @@ bool FindBestSourceMatch(const std::wstring&              srcfile,
     int                         best_score = -1;
     std::vector<MatchCandidate> ties;
     for (const auto& h : hits) {
-        std::vector<std::wstring> hsegs = SplitSegments(h);
-        int                       n     = TrailingMatchCount(hsegs, src_segs);
+        std::vector<std::wstring> hsegs = SplitPathSegments(h);
+        int                       n     = TrailingSegmentMatch(hsegs, src_segs);
         if (n > best_score) {
             best_score = n;
             ties.clear();

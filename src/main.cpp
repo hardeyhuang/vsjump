@@ -7,7 +7,10 @@
 //                                                      (resolve a non-local
 //                                                       source path against
 //                                                       one or more local
-//                                                       source roots)
+//                                                       source roots; falls
+//                                                       back to Everything
+//                                                       global search if no
+//                                                       destdir match)
 //
 // Usage:
 //   vsjump.exe register              Register the vsjump:// protocol
@@ -16,6 +19,7 @@
 //   vsjump.exe "vsjump://match/?srcfile=...&destdir=..."
 //   vsjump.exe --help
 
+#include "everything_search.h"
 #include "path_utils.h"
 #include "picker_dialog.h"
 #include "protocol_register.h"
@@ -65,7 +69,9 @@ void PrintHelp() {
         L"  vsjump://match/?srcfile=<src>:<line>[:<col>]&destdir=<dir>\r\n"
         L"  Looks up a (typically WinDbg-reported) source path inside one\r\n"
         L"  or more local source roots by trailing-segment match. Multiple\r\n"
-        L"  destdir= values are allowed.\r\n");
+        L"  destdir= values are allowed.  If no destdir match is found and\r\n"
+        L"  Everything.exe is running, VsJump falls back to a global\r\n"
+        L"  basename search via the Everything IPC SDK.\r\n");
 }
 
 int CmdRegister() {
@@ -183,23 +189,53 @@ std::wstring ResolveTargetFile(const vsjump::VsUrl& parsed, int* out_rc) {
         return abs_file;
     }
 
-    // Match kind.
+    // --- Match kind ---------------------------------------------------------
+    // Step 1: search the user-specified destdir roots.
     vsjump::MatchCandidate              best;
     std::vector<vsjump::MatchCandidate> ties;
-    if (!vsjump::FindBestSourceMatch(parsed.file, parsed.match_dirs,
-                                     &best, &ties)) {
-        std::wstring roots;
-        for (const auto& d : parsed.match_dirs) {
-            if (!roots.empty()) roots += L"\n";
-            roots += L"  " + d;
+    bool found_in_dirs =
+        !parsed.match_dirs.empty() &&
+        vsjump::FindBestSourceMatch(parsed.file, parsed.match_dirs,
+                                    &best, &ties);
+
+    // Step 2: if nothing matched (or no destdir was given), fall back to a
+    //         global Everything-based lookup when Everything is running.
+    std::wstring fallback_note;
+    if (!found_in_dirs) {
+        vsjump::EverythingSearchResult ev =
+            vsjump::SearchWithEverything(parsed.file);
+
+        if (ev.succeeded && !ev.ties.empty()) {
+            ties = ev.ties;
+            best = ties.front();
+            fallback_note = L"\n(matched globally via Everything)";
+        } else {
+            // Nothing found anywhere — report a useful diagnostic.
+            std::wstring roots;
+            if (parsed.match_dirs.empty()) {
+                roots = L"  (none provided)";
+            } else {
+                for (const auto& d : parsed.match_dirs) {
+                    if (!roots.empty()) roots += L"\n";
+                    roots += L"  " + d;
+                }
+            }
+            std::wstring extra;
+            if (!ev.attempted) {
+                extra = L"\n\nGlobal lookup skipped: " + ev.unavailable_reason +
+                        L"\n(Run Everything.exe to enable a system-wide "
+                        L"basename search.)";
+            } else if (!ev.succeeded) {
+                extra = L"\n\nEverything was queried but returned no files "
+                        L"with a matching basename.";
+            }
+            Msg(L"VsJump — no match",
+                L"No file matching the source path was found.\n\nSource:\n  " +
+                parsed.file + L"\n\nSearched roots:\n" + roots + extra,
+                MB_ICONWARNING);
+            *out_rc = 7;
+            return {};
         }
-        Msg(L"VsJump — no match",
-            L"No file matching the source path was found under the given "
-            L"destdir(s).\n\nSource:\n  " + parsed.file +
-            L"\n\nSearched roots:\n" + roots,
-            MB_ICONWARNING);
-        *out_rc = 7;
-        return {};
     }
 
     // Unique best — done.
@@ -216,7 +252,7 @@ std::wstring ResolveTargetFile(const vsjump::VsUrl& parsed, int* out_rc) {
         L"VsJump — Multiple matches",
         L"Several local files match the source path equally well. "
         L"Pick which one to open:",
-        L"Source:\n" + parsed.file,
+        L"Source:\n" + parsed.file + fallback_note,
         opts,
         /*default_index=*/0);
 

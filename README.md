@@ -26,14 +26,21 @@ that one opens the file. Otherwise the tool tells you and stops.
   local file by recursive name + tail-segment matching against one or more
   local source roots (see [Match form](#match-form)):
   - `vsjump://match/?srcfile=c:\build\agent\src\foo.cpp:1234:8&destdir=D:\repo`
+- **Everything fallback** — if the `destdir` roots don't contain the file
+  and `Everything.exe` is running on the machine, VsJump issues a global
+  basename query through the [Everything SDK][everything-sdk] and ranks
+  the hits with the same trailing-segment scoring.
 - **Smart routing** — enumerates running VS instances via the COM Running
   Object Table (`!VisualStudio.DTE.*`) and picks the right one (see
   [How the target VS is chosen](#how-the-target-vs-is-chosen)).
 - **Per-user install** — writes only to `HKEY_CURRENT_USER`, no admin rights
   required.
-- **Self-contained `.exe`** — statically linked MSVC runtime, no extra DLLs.
+- **Self-contained `.exe`** — statically linked MSVC runtime; the only
+  optional sidecar is `Everything64.dll` (loaded lazily on demand).
 - **Bitness-agnostic** — a 32-bit `vsjump.exe` can drive a 64-bit VS (COM
   marshals across the ROT).
+
+[everything-sdk]: https://www.voidtools.com/support/everything/sdk/
 
 ---
 
@@ -138,9 +145,17 @@ Resolution algorithm:
    (case-insensitive, follows no symlinks/junctions).
 3. Score each hit by the number of **trailing path segments** it shares with
    `srcfile` (case-insensitive). Highest score wins.
-4. If multiple hits tie for the top score, a picker dialog asks the user.
-5. If no file with that basename exists under any `destdir`, an error is
-   shown and exit code `7` is returned.
+4. **Everything fallback** — if step 2 found nothing (or no `destdir` was
+   given) **and** [Everything][everything-sdk] is running, VsJump issues an
+   IPC query for the basename, filters to exact-name matches, and ranks the
+   results with the same trailing-segment scoring. The DLL
+   (`Everything64.dll`) is **loaded lazily**; if it can't be loaded or
+   Everything isn't running, this step is silently skipped.
+5. If multiple hits tie for the top score, a picker dialog asks the user
+   (the dialog notes when the candidates came from the global Everything
+   search).
+6. If no file with that basename is found anywhere, an error is shown and
+   exit code `7` is returned.
 
 Examples:
 
@@ -155,7 +170,17 @@ vsjump://match/?srcfile=/builds/x/src/foo.cpp:42&destdir=D:\repoA&destdir=D:\rep
 
 > Tip: keep `destdir` reasonably scoped (a project tree, not all of `C:\`)
 > so the recursive scan stays fast. The scan does not prune `node_modules`,
-> `.git`, build outputs, etc.
+> `.git`, build outputs, etc. — when those are unavoidable, just run
+> Everything and let the fallback do a system-wide lookup instead.
+
+#### Everything dependency
+
+The fallback uses the official [voidtools Everything SDK][everything-sdk],
+vendored under [`third_party/everything-sdk/`](third_party/everything-sdk/).
+Only the header and `Everything64.dll` are checked in (MIT-licensed); CMake
+copies the DLL next to `vsjump.exe` after each build, and the DLL is loaded
+through `LoadLibrary`/`GetProcAddress` at runtime, so VsJump still works on
+machines without Everything — the fallback simply turns into a no-op.
 
 ---
 

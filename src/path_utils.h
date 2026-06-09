@@ -18,6 +18,16 @@ std::wstring ToLowerAscii(std::wstring s);
 // Get current executable full path.
 std::wstring GetExecutablePath();
 
+// Split a path into segments, treating both '\\' and '/' as separators.
+// Empty segments are dropped.
+//   "C:\\foo\\bar.cpp" -> {"C:", "foo", "bar.cpp"}
+//   "/builds/x/foo.cpp" -> {"builds", "x", "foo.cpp"}
+std::vector<std::wstring> SplitPathSegments(const std::wstring& path);
+
+// Number of trailing segments of `a` and `b` that match (ASCII case-insensitive).
+int TrailingSegmentMatch(const std::vector<std::wstring>& a,
+                         const std::vector<std::wstring>& b);
+
 // Result of FindBestSourceMatch.
 struct MatchCandidate {
     std::wstring path;             // Absolute path under one of the search roots.

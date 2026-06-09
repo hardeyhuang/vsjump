@@ -31,6 +31,8 @@ set(SOURCES
     src/picker_dialog.h
     src/path_utils.cpp
     src/path_utils.h
+    src/everything_search.cpp
+    src/everything_search.h
     src/vsjump.manifest
 )
 
@@ -45,6 +47,11 @@ endif()
 
 target_include_directories(vsjump PRIVATE src)
 
+# Everything SDK (vendored): we only need the header at compile time; the
+# DLL is loaded lazily at runtime via LoadLibrary, so no .lib link is needed.
+set(EVERYTHING_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/everything-sdk")
+target_include_directories(vsjump PRIVATE "${EVERYTHING_SDK_DIR}/include")
+
 # COM / OLE / Shell libs
 target_link_libraries(vsjump PRIVATE
     ole32
@@ -56,4 +63,19 @@ target_link_libraries(vsjump PRIVATE
     comctl32
 )
 
+# Stage Everything64.dll next to vsjump.exe so the runtime LoadLibrary call
+# finds it without polluting PATH.
+set(EVERYTHING_DLL "${EVERYTHING_SDK_DIR}/dll/Everything64.dll")
+if(EXISTS "${EVERYTHING_DLL}")
+    add_custom_command(TARGET vsjump POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${EVERYTHING_DLL}"
+                "$<TARGET_FILE_DIR:vsjump>/Everything64.dll"
+        COMMENT "Copying Everything64.dll next to vsjump.exe"
+        VERBATIM)
+endif()
+
 install(TARGETS vsjump RUNTIME DESTINATION bin)
+if(EXISTS "${EVERYTHING_DLL}")
+    install(FILES "${EVERYTHING_DLL}" DESTINATION bin)
+endif()
