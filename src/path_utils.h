@@ -34,18 +34,22 @@ struct MatchCandidate {
     int          matched_segments; // Number of trailing path segments that match `srcfile`.
 };
 
-// Search every directory in `roots` (recursively) for files whose basename
-// equals the basename of `srcfile`, then rank by trailing-segment match
-// length against `srcfile` (case-insensitive).
+// Resolve `srcfile` against the directories in `roots` using ONLY a stat-based
+// trailing-suffix probe — for every root we join the root with progressively
+// longer trailing-segment suffixes of `srcfile` and check whether the
+// resulting absolute path exists as a regular file.  The longest suffix that
+// exists wins per root.
+//
+// We deliberately do NOT recursively walk `roots`: those are typically huge
+// source trees (UE, monorepos) where a recursive walk costs many seconds,
+// while a suffix probe costs O(depth) syscalls and finishes in milliseconds.
+// If no destdir root yields a match, the caller is expected to fall back to
+// a global filename search (e.g. via Everything).
 //
 // `out_best` receives the best candidate (highest matched_segments).  All
 // candidates that tie for the top score are returned in `out_ties` (in the
-// order encountered).  If no file with that basename is found anywhere,
-// returns false and `out_ties` is empty.
-//
-// The basename comparison is case-insensitive (Windows semantics).  Hidden
-// directories (`.git`, `.vs`, `node_modules`, build output dirs) are NOT
-// pruned automatically — keep `roots` reasonably scoped for fast scans.
+// order encountered).  If no file matches under any root, returns false and
+// `out_ties` is empty.
 bool FindBestSourceMatch(const std::wstring&              srcfile,
                          const std::vector<std::wstring>& roots,
                          MatchCandidate*                  out_best,

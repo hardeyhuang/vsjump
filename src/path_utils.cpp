@@ -123,48 +123,49 @@ int TrailingSegmentMatch(const std::vector<std::wstring>& a,
 
 namespace {
 
-// Recursively walk `dir` and append every regular file whose basename equals
-// `basename` (case-insensitive) to `out`.
-void CollectByBasename(const std::wstring&        dir,
-                       const std::wstring&        basename,
-                       std::vector<std::wstring>& out) {
-    std::wstring pattern = dir;
-    if (!pattern.empty() && pattern.back() != L'\\') pattern.push_back(L'\\');
-    pattern.push_back(L'*');
+// Fast path: try to resolve `srcfile` directly inside `root` by joining the
+// root with progressively longer trailing-segment suffixes of `srcfile` and
+// checking whether the resulting absolute path exists as a regular file.
+//
+// Example: srcfile = "G:/.../Engine/Source/Runtime/Engine/Private/Materials/Foo.cpp"
+//          root    = "D:\\UnrealEngine"
+//          tries:   "D:\\UnrealEngine\\Foo.cpp"
+//                   "D:\\UnrealEngine\\Materials\\Foo.cpp"
+//                   "D:\\UnrealEngine\\Private\\Materials\\Foo.cpp"
+//                   ...
+//          stops on the first hit (longest suffix that exists).
+//
+// On hit, appends the absolute path to `out`.  Returns true iff a hit was
+// found.  This is the *only* matching strategy used against destdir roots —
+// we deliberately do NOT recursively walk the tree, because UE / monorepo
+// roots are routinely huge (millions of files) and a stat-based suffix probe
+// finishes in O(depth) syscalls.
+bool TryDirectSuffixMatch(const std::wstring&              root,
+                          const std::vector<std::wstring>& src_segs,
+                          std::vector<std::wstring>&       out) {
+    if (src_segs.empty()) return false;
 
-    WIN32_FIND_DATAW fd{};
-    HANDLE           h = ::FindFirstFileExW(pattern.c_str(),
-                                            FindExInfoBasic,
-                                            &fd,
-                                            FindExSearchNameMatch,
-                                            nullptr,
-                                            FIND_FIRST_EX_LARGE_FETCH);
-    if (h == INVALID_HANDLE_VALUE) return;
+    std::wstring base = root;
+    if (!base.empty() && base.back() != L'\\') base.push_back(L'\\');
 
-    do {
-        const wchar_t* name = fd.cFileName;
-        if (name[0] == L'.' &&
-            (name[1] == L'\0' || (name[1] == L'.' && name[2] == L'\0'))) {
-            continue;
+    // Try suffixes from longest to shortest. Longest first means we prefer a
+    // hit deep inside the tree (more specific / higher trailing-segment score).
+    const size_t total = src_segs.size();
+    for (size_t take = total; take >= 1; --take) {
+        std::wstring candidate = base;
+        for (size_t i = total - take; i < total; ++i) {
+            candidate += src_segs[i];
+            if (i + 1 < total) candidate.push_back(L'\\');
         }
 
-        std::wstring full = dir;
-        if (full.empty() || full.back() != L'\\') full.push_back(L'\\');
-        full += name;
-
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            // Skip reparse points to avoid following symlinks/junctions in loops.
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
-            CollectByBasename(full, basename, out);
-        } else {
-            std::wstring leaf = name;
-            if (EqIgnoreCaseAscii(leaf, basename)) {
-                out.push_back(full);
-            }
+        DWORD attr = ::GetFileAttributesW(candidate.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES &&
+            !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            out.push_back(candidate);
+            return true;
         }
-    } while (::FindNextFileW(h, &fd));
-
-    ::FindClose(h);
+    }
+    return false;
 }
 
 } // namespace
@@ -180,24 +181,47 @@ bool FindBestSourceMatch(const std::wstring&              srcfile,
 
     std::vector<std::wstring> src_segs = SplitPathSegments(srcfile);
     if (src_segs.empty()) return false;
-    const std::wstring& basename = src_segs.back();
 
-    // 1. Collect all files with the matching basename across all roots.
-    std::vector<std::wstring> hits;
+    // Pre-resolve roots once, drop ones that don't exist or aren't directories.
+    std::vector<std::wstring> abs_roots;
+    abs_roots.reserve(roots.size());
     for (const auto& root : roots) {
         std::wstring abs_root = NormalizePath(root);
         if (abs_root.empty()) continue;
-
         DWORD attr = ::GetFileAttributesW(abs_root.c_str());
         if (attr == INVALID_FILE_ATTRIBUTES) continue;
         if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        abs_roots.push_back(std::move(abs_root));
+    }
+    if (abs_roots.empty()) return false;
 
-        CollectByBasename(abs_root, basename, hits);
+    // The only strategy: stat-based trailing-suffix probe for every root.
+    // No recursive directory walks — those are pathological on UE-sized trees.
+    std::vector<std::wstring> hits;
+    for (const auto& abs_root : abs_roots) {
+        TryDirectSuffixMatch(abs_root, src_segs, hits);
     }
 
     if (hits.empty()) return false;
 
-    // 2. Score each hit by trailing-segment match length.
+    // De-duplicate (the same file path could in principle surface twice if
+    // two destdir entries resolve to nested directories).
+    {
+        std::vector<std::wstring> uniq;
+        uniq.reserve(hits.size());
+        for (auto& h : hits) {
+            std::wstring key = ToLowerAscii(h);
+            bool         dup = false;
+            for (const auto& u : uniq) {
+                if (ToLowerAscii(u) == key) { dup = true; break; }
+            }
+            if (!dup) uniq.push_back(h);
+        }
+        hits = std::move(uniq);
+    }
+
+    // Score each hit by trailing-segment match length and return only the
+    // best-scoring set (caller will disambiguate any ties via a picker).
     int                         best_score = -1;
     std::vector<MatchCandidate> ties;
     for (const auto& h : hits) {

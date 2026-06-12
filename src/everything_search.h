@@ -19,8 +19,9 @@ struct EverythingSearchResult {
 
     // Files (absolute paths) returned by Everything whose basename equals the
     // basename of the query path, ranked by trailing-segment match length
-    // (highest first).  Only the top score's candidates are kept; if there is
-    // a unique top scorer, `ties` will contain exactly one entry.
+    // (highest first).  ALL matches are kept — the caller is expected to
+    // present them to the user so they can pick the right one.  Within the
+    // same score, files are listed in the order Everything returned them.
     std::vector<MatchCandidate> ties;
 };
 

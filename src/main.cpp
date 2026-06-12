@@ -41,15 +41,25 @@ void Msg(const std::wstring& title, const std::wstring& body, UINT flags) {
                   flags | MB_SETFOREGROUND);
 }
 
+// Print to the parent console *if* we were launched from one (cmd / pwsh).
+// We never AllocConsole — we run under /SUBSYSTEM:WINDOWS specifically to
+// avoid a black flash when the shell / browser invokes the protocol handler.
+// When there is no parent console (typical protocol launch), `s` is shown in
+// a message box instead so the user still gets the help text.
 void PrintConsole(const std::wstring& s) {
-    if (::AttachConsole(ATTACH_PARENT_PROCESS) || ::AllocConsole()) {
-        DWORD written = 0;
-        ::WriteConsoleW(::GetStdHandle(STD_OUTPUT_HANDLE),
-                        s.c_str(), static_cast<DWORD>(s.size()),
-                        &written, nullptr);
-        ::WriteConsoleW(::GetStdHandle(STD_OUTPUT_HANDLE),
-                        L"\r\n", 2, &written, nullptr);
+    if (::AttachConsole(ATTACH_PARENT_PROCESS)) {
+        HANDLE out = ::GetStdHandle(STD_OUTPUT_HANDLE);
+        if (out && out != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            ::WriteConsoleW(out, s.c_str(),
+                            static_cast<DWORD>(s.size()), &written, nullptr);
+            ::WriteConsoleW(out, L"\r\n", 2, &written, nullptr);
+        }
+        ::FreeConsole();
+        return;
     }
+    ::MessageBoxW(nullptr, s.c_str(), L"VsJump",
+                  MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
 }
 
 void PrintHelp() {
@@ -190,7 +200,8 @@ std::wstring ResolveTargetFile(const vsjump::VsUrl& parsed, int* out_rc) {
     }
 
     // --- Match kind ---------------------------------------------------------
-    // Step 1: search the user-specified destdir roots.
+    // Step 1: try the user-specified destdir roots via stat-based trailing
+    //         suffix probe (no recursive scans).
     vsjump::MatchCandidate              best;
     std::vector<vsjump::MatchCandidate> ties;
     bool found_in_dirs =
@@ -198,69 +209,92 @@ std::wstring ResolveTargetFile(const vsjump::VsUrl& parsed, int* out_rc) {
         vsjump::FindBestSourceMatch(parsed.file, parsed.match_dirs,
                                     &best, &ties);
 
-    // Step 2: if nothing matched (or no destdir was given), fall back to a
-    //         global Everything-based lookup when Everything is running.
-    std::wstring fallback_note;
-    if (!found_in_dirs) {
-        vsjump::EverythingSearchResult ev =
-            vsjump::SearchWithEverything(parsed.file);
+    if (found_in_dirs) {
+        // Unique best — open directly.
+        if (ties.size() == 1) {
+            return vsjump::NormalizePath(best.path);
+        }
+        // Multiple destdir roots produced files tied for the highest
+        // trailing-segment match — ask the user which one they want.
+        std::vector<std::wstring> opts;
+        opts.reserve(ties.size());
+        for (const auto& c : ties) opts.push_back(c.path);
 
-        if (ev.succeeded && !ev.ties.empty()) {
-            ties = ev.ties;
-            best = ties.front();
-            fallback_note = L"\n(matched globally via Everything)";
-        } else {
-            // Nothing found anywhere — report a useful diagnostic.
-            std::wstring roots;
-            if (parsed.match_dirs.empty()) {
-                roots = L"  (none provided)";
-            } else {
-                for (const auto& d : parsed.match_dirs) {
-                    if (!roots.empty()) roots += L"\n";
-                    roots += L"  " + d;
-                }
-            }
-            std::wstring extra;
-            if (!ev.attempted) {
-                extra = L"\n\nGlobal lookup skipped: " + ev.unavailable_reason +
-                        L"\n(Run Everything.exe to enable a system-wide "
-                        L"basename search.)";
-            } else if (!ev.succeeded) {
-                extra = L"\n\nEverything was queried but returned no files "
-                        L"with a matching basename.";
-            }
-            Msg(L"VsJump — no match",
-                L"No file matching the source path was found.\n\nSource:\n  " +
-                parsed.file + L"\n\nSearched roots:\n" + roots + extra,
-                MB_ICONWARNING);
-            *out_rc = 7;
+        int chosen = vsjump::PickFromList(
+            L"VsJump — Multiple matches",
+            L"Several local files match the source path equally well. "
+            L"Pick which one to open:",
+            L"Source:\n" + parsed.file,
+            opts,
+            /*default_index=*/0);
+        if (chosen < 0) {
+            *out_rc = 0;  // user cancelled
             return {};
         }
+        return vsjump::NormalizePath(ties[static_cast<size_t>(chosen)].path);
     }
 
-    // Unique best — done.
-    if (ties.size() == 1) {
-        return vsjump::NormalizePath(best.path);
+    // Step 2: no destdir match — fall back to a global Everything lookup.
+    //         Unlike the destdir path, we ALWAYS show a picker here (even for
+    //         a single result), because Everything matches any file with the
+    //         same basename anywhere on disk and the user should confirm.
+    vsjump::EverythingSearchResult ev =
+        vsjump::SearchWithEverything(parsed.file);
+
+    if (!ev.succeeded || ev.ties.empty()) {
+        std::wstring roots;
+        if (parsed.match_dirs.empty()) {
+            roots = L"  (none provided)";
+        } else {
+            for (const auto& d : parsed.match_dirs) {
+                if (!roots.empty()) roots += L"\n";
+                roots += L"  " + d;
+            }
+        }
+        std::wstring extra;
+        if (!ev.attempted) {
+            extra = L"\n\nGlobal lookup skipped: " + ev.unavailable_reason +
+                    L"\n(Run Everything.exe to enable a system-wide "
+                    L"basename search.)";
+        } else {
+            extra = L"\n\nEverything was queried but returned no files "
+                    L"with a matching basename.";
+        }
+        Msg(L"VsJump — no match",
+            L"No file matching the source path was found.\n\nSource:\n  " +
+            parsed.file + L"\n\nSearched roots:\n" + roots + extra,
+            MB_ICONWARNING);
+        *out_rc = 7;
+        return {};
     }
 
-    // Multiple files tied for the highest trailing-segment match — ask user.
+    // Everything returned candidates — already sorted by trailing-segment
+    // match length (highest first). Show all of them and let the user pick.
     std::vector<std::wstring> opts;
-    opts.reserve(ties.size());
-    for (const auto& c : ties) opts.push_back(c.path);
+    opts.reserve(ev.ties.size());
+    for (const auto& c : ev.ties) {
+        // Annotate the option with its trailing-match score so the user can
+        // tell at a glance which candidates share the most context.
+        wchar_t scorebuf[32];
+        ::swprintf_s(scorebuf, L" [match: %d]", c.matched_segments);
+        opts.push_back(c.path + scorebuf);
+    }
 
     int chosen = vsjump::PickFromList(
-        L"VsJump — Multiple matches",
-        L"Several local files match the source path equally well. "
-        L"Pick which one to open:",
-        L"Source:\n" + parsed.file + fallback_note,
+        L"VsJump — Everything global matches",
+        L"No file matched under the specified destdir roots. "
+        L"Pick a file from the global Everything index:",
+        L"Source:\n" + parsed.file +
+        L"\n\nResults are ordered by how many trailing path segments match "
+        L"the source — longest match on top.",
         opts,
         /*default_index=*/0);
-
     if (chosen < 0) {
         *out_rc = 0;  // user cancelled
         return {};
     }
-    return vsjump::NormalizePath(ties[static_cast<size_t>(chosen)].path);
+    return vsjump::NormalizePath(
+        ev.ties[static_cast<size_t>(chosen)].path);
 }
 
 int CmdOpenUrl(const std::wstring& url) {
@@ -341,26 +375,39 @@ bool EqIgnoreCase(const std::wstring& a, const wchar_t* b) {
 
 } // namespace
 
-int wmain(int argc, wchar_t** argv) {
+int APIENTRY wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/,
+                      LPWSTR /*lpCmdLine*/, int /*nShowCmd*/) {
+    int      argc  = 0;
+    LPWSTR*  argv  = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
+    if (!argv) {
+        Msg(L"VsJump", L"Failed to parse command line.", MB_ICONERROR);
+        return 1;
+    }
+
+    auto cleanup = [&](int rc) -> int {
+        ::LocalFree(argv);
+        return rc;
+    };
+
     if (argc < 2) {
         PrintHelp();
-        return 1;
+        return cleanup(1);
     }
 
     std::wstring a1 = argv[1];
 
     if (EqIgnoreCase(a1, L"register") || EqIgnoreCase(a1, L"--register") ||
         EqIgnoreCase(a1, L"-r")) {
-        return CmdRegister();
+        return cleanup(CmdRegister());
     }
     if (EqIgnoreCase(a1, L"unregister") || EqIgnoreCase(a1, L"--unregister")) {
-        return CmdUnregister();
+        return cleanup(CmdUnregister());
     }
     if (EqIgnoreCase(a1, L"--help") || EqIgnoreCase(a1, L"-h") ||
         EqIgnoreCase(a1, L"/?")) {
         PrintHelp();
-        return 0;
+        return cleanup(0);
     }
 
-    return CmdOpenUrl(a1);
+    return cleanup(CmdOpenUrl(a1));
 }

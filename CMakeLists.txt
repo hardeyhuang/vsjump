@@ -38,10 +38,12 @@ set(SOURCES
 
 add_executable(vsjump ${SOURCES})
 
-# Console subsystem with the wide-char CRT entry point (we use wmain).
+# Windows (GUI) subsystem so that launching vsjump.exe from the shell or a
+# browser protocol handler does NOT flash a black console window. We still
+# want wide-char argv, so use the wWinMain CRT entry point.
 if(MSVC)
     set_target_properties(vsjump PROPERTIES
-        LINK_FLAGS "/SUBSYSTEM:CONSOLE /ENTRY:wmainCRTStartup"
+        LINK_FLAGS "/SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup"
     )
 endif()
 

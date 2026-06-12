@@ -4,6 +4,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <utility>
 #include <vector>
 
 // We deliberately don't link against Everything64.lib — every entry point we
@@ -237,15 +239,15 @@ EverythingSearchResult SearchWithEverything(const std::wstring& srcfile) {
         return r;
     }
 
-    // Keep only top-scoring entries.
-    int best = -1;
-    for (const auto& c : all) {
-        if (c.matched_segments > best) best = c.matched_segments;
-    }
-    for (auto& c : all) {
-        if (c.matched_segments == best) r.ties.push_back(std::move(c));
-    }
+    // Sort by trailing-segment score, highest first.  std::stable_sort
+    // preserves Everything's original ordering for ties (which is roughly
+    // the on-disk indexing order — close enough to "alphabetical-ish").
+    std::stable_sort(all.begin(), all.end(),
+                     [](const MatchCandidate& a, const MatchCandidate& b) {
+                         return a.matched_segments > b.matched_segments;
+                     });
 
+    r.ties     = std::move(all);
     r.succeeded = !r.ties.empty();
     return r;
 }
