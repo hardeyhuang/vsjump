@@ -273,12 +273,21 @@ bool OpenFileInVs(IDispatch* dte, const std::wstring& file, int line, int column
         HRESULT hr_goto = InvokeMethod(selection, L"GotoLine", &r.v, a, 2);
 
         // Optionally move to column on the same line.
+        //
+        // EnvDTE.TextSelection.MoveToDisplayColumn(Line, Column, [Extend = False])
+        // is a THREE-argument method.  DISPPARAMS.rgvarg is passed in REVERSE
+        // order, so the array must be laid out as:
+        //     b[2] = Line, b[1] = Column, b[0] = Extend
+        // Passing only two VARIANTs landed `column` in the *Line* parameter
+        // (and VARIANT_FALSE in Column), which yanked the caret back to line
+        // == `column` — i.e. "vsjump://file/foo.cpp:123:1" jumped to line 1.
         if (SUCCEEDED(hr_goto) && column > 0) {
-            VARIANT b[2];
+            VARIANT b[3];
             ::VariantInit(&b[0]); b[0].vt = VT_BOOL; b[0].boolVal = VARIANT_FALSE; // Extend
             ::VariantInit(&b[1]); b[1].vt = VT_I4;   b[1].lVal    = column;        // Column
+            ::VariantInit(&b[2]); b[2].vt = VT_I4;   b[2].lVal    = line;          // Line
             VariantGuard r2;
-            InvokeMethod(selection, L"MoveToDisplayColumn", &r2.v, b, 2);
+            InvokeMethod(selection, L"MoveToDisplayColumn", &r2.v, b, 3);
         }
 
         selection->Release();
